@@ -17,27 +17,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--limit-memory-soft",
         type=int,
-        default=2058 * _MiB,
+        default=None,
         metavar="BYTES",
         help="memory soft limit for all processes (default: 2058 MiB)",
     )
     p.add_argument(
         "--limit-memory-hard",
         type=int,
-        default=2560 * _MiB,
+        default=None,
         metavar="BYTES",
         help="memory hard limit for all processes (default: 2560 MiB)",
     )
     p.add_argument(
         "--limit-request",
         type=int,
-        default=65535,
+        default=None,
         help="max requests/cron jobs per process (default: 65535)",
     )
     p.add_argument(
         "--limit-time-real",
         type=float,
-        default=120,
+        default=None,
         metavar="SECONDS",
         help="max real time per request for all processes (default: 120)",
     )
@@ -108,7 +108,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--limit-time-real-cron",
         type=float,
-        default=600,
+        default=None,
         metavar="SECONDS",
         help="max real time per cron job (default: 600)",
     )
@@ -151,17 +151,63 @@ def _split_argv() -> tuple[list[str], list[str]]:
         return argv, []
 
 
+_BUILTIN_LIMITS: dict[str, int | float] = {
+    "limit_memory_soft": 2058 * _MiB,
+    "limit_memory_hard": 2560 * _MiB,
+    "limit_request": 65535,
+    "limit_time_real": 120.0,
+    "limit_time_real_cron": 600.0,
+}
+
+
+def _apply_config(args: argparse.Namespace) -> None:
+    from odoo.tools import config
+
+    # Three-level precedence: CLI flag > odoo.conf value > built-in default
+    for attr, key in [
+        ("limit_memory_soft", "limit_memory_soft"),
+        ("limit_memory_hard", "limit_memory_hard"),
+        ("limit_request", "limit_request"),
+        ("limit_time_real", "limit_time_real"),
+        ("limit_time_real_cron", "limit_time_real_cron"),
+    ]:
+        cli_val = getattr(args, attr)
+        if cli_val is not None:
+            config[key] = cli_val
+        elif not config[key]:
+            config[key] = _BUILTIN_LIMITS[attr]
+
+    # CLI fully owns network binding
+    config["http_port"] = args.http_port
+    config["http_interface"] = args.host
+
+    # v0.1: Worker.check_limits() reads config directly; 0 disables soft enforcement
+    config["limit_memory_soft"] = 0
+    # prevent Odoo's own worker management from activating
+    config["workers"] = 0
+    config["max_cron_threads"] = 0
+    config["http_enable"] = True
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     hybrid_argv, odoo_argv = _split_argv()
     args = _build_parser().parse_args(hybrid_argv)
-    _logger.info(
-        "thread_workers=%d cron_workers=%d gevent_workers=%d odoo_args=%r",
-        args.workers_thread,
-        args.workers_cron,
-        args.workers_gevent,
-        odoo_argv,
-    )
+
+    from odoo.service.server import load_server_wide_modules
+    from odoo.tools import config
+
+    config.parse_config(odoo_argv)
+    _apply_config(args)
+    load_server_wide_modules()
+
+    import odoo.http  # noqa: F401  # initialize wsgi app before fork
+
+    preload_dbs = config["db_name"] if args.preload else []
+
+    from odoo_hybrid.server import HybridMaster
+
+    sys.exit(HybridMaster(args).run(preload_dbs))
 
 
 if __name__ == "__main__":
