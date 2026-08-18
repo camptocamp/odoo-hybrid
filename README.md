@@ -226,6 +226,11 @@ Odoo itself is not declared as a package dependency — it must be present in th
 - No soft memory / request / time-real limit enforcement
 - Hard memory limit enforced (SIGKILL on OOM)
 
+### v0.1.1 — Automated tests
+
+- pytest test suite covering CLI parsing, HybridMaster, and ThreadedWorker
+- Odoo import stubs so unit tests run without a real Odoo installation
+
 ### v0.2 — Resource management
 
 - Drain logic for threaded workers (soft memory limit, request count, time-real)
