@@ -8,8 +8,10 @@ import fcntl
 import logging
 import os
 import select
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -136,6 +138,10 @@ class HybridMaster:
         self.workers_cron: dict[int, WorkerCron] = {}
         self.n_workers_thread = args.workers_thread
         self.n_workers_cron = min(args.workers_cron, 1)
+        self.n_workers_gevent: int = args.workers_gevent
+        self.gevent_pid: int | None = None
+        self.gevent_port: int = config["gevent_port"]
+        self.odoo_argv: list[str] = args.odoo_argv
         # read values already resolved by _apply_config
         self.timeout: float = config["limit_time_real"]
         cron_timeout = config["limit_time_real_cron"] or None
@@ -146,6 +152,7 @@ class HybridMaster:
         # per-thread-worker limits (fall back to global when not overridden)
         self.limit_memory_soft: int = args.limit_memory_soft_effective or 0
         self.limit_memory_soft_thread: int = args.limit_memory_soft_thread or self.limit_memory_soft
+        self.limit_memory_soft_gevent: int = args.limit_memory_soft_gevent or self.limit_memory_soft
         self.limit_request_thread: int = args.limit_request_thread or self.limit_request
         self.timeout_thread: float = args.limit_time_real_thread or self.timeout
 
@@ -223,6 +230,10 @@ class HybridMaster:
                 wpid, status = os.waitpid(-1, os.WNOHANG)
                 if not wpid:
                     break
+                if wpid == self.gevent_pid:
+                    _logger.warning("GeventWorker (%s) exited", wpid)
+                    self.gevent_pid = None
+                    continue
                 if (status >> 8) == 3:
                     _logger.critical("Critical worker error (%s)", wpid)
                     raise Exception(f"Critical worker error ({wpid})")
@@ -274,11 +285,35 @@ class HybridMaster:
         worker.run()
         sys.exit(0)
 
+    def _spawn_gevent_worker(self) -> None:
+        odoo_bin = shutil.which("odoo-bin")
+        if odoo_bin is None:
+            import odoo as _odoo_pkg
+
+            odoo_bin = os.path.join(os.path.dirname(os.path.dirname(_odoo_pkg.__file__)), "odoo-bin")
+        cmd = [
+            sys.executable,
+            odoo_bin,
+            "gevent",
+            "--gevent-port",
+            str(self.gevent_port),
+            "--http-interface",
+            self.interface,
+        ]
+        if self.limit_memory_soft_gevent:
+            cmd += ["--limit-memory-soft", str(self.limit_memory_soft_gevent)]
+        cmd += self.odoo_argv
+        proc = subprocess.Popen(cmd)
+        self.gevent_pid = proc.pid
+        _logger.info("GeventWorker (%s) spawned", proc.pid)
+
     def process_spawn(self) -> None:
         while len(self.workers_thread) < self.n_workers_thread:
             self._spawn_threaded_worker()
         while len(self.workers_cron) < self.n_workers_cron:
             self._spawn_cron_worker()
+        if self.n_workers_gevent and not self.gevent_pid:
+            self._spawn_gevent_worker()
 
     # ------------------------------------------------------------------
     # Beat loop
@@ -335,6 +370,10 @@ class HybridMaster:
         if self.socket:
             self.socket.close()
             self.socket = None
+        if self.gevent_pid is not None:
+            with contextlib.suppress(OSError):
+                os.kill(self.gevent_pid, signal.SIGKILL)
+            self.gevent_pid = None
         if graceful:
             _logger.info("Stopping workers gracefully")
             for pid in list(self.workers):
