@@ -38,7 +38,7 @@ class TestParser:
         assert args.workers_gevent == 1
         assert args.http_port == 8069
         assert args.gevent_port == 8072
-        assert args.host == "localhost"
+        assert args.host == "0.0.0.0"
         assert args.preload is False
         # These must default to None so _apply_config detects "not set on CLI"
         assert args.limit_memory_soft is None

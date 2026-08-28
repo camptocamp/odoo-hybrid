@@ -99,7 +99,7 @@ def default_args():
         workers_gevent=1,
         http_port=8069,
         gevent_port=8072,
-        host="localhost",
+        host="0.0.0.0",
         preload=False,
         limit_memory_soft=None,
         limit_memory_hard=None,
