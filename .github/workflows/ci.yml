@@ -19,7 +19,7 @@ jobs:
         run: pip install -e '.[dev]'
 
       - name: pre-commit (ruff lint + format)
-        uses: pre-commit/action@v3.0.1
+        run: pre-commit run --all-files
 
       - name: Unit tests
         run: pytest tests/ -m "not integration" -v

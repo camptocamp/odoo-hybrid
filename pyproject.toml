@@ -17,7 +17,7 @@ odoo-hybrid = "odoo_hybrid.__main__:main"
 packages = ["src/odoo_hybrid"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-mock>=3"]
+dev = ["pytest>=8", "pytest-mock>=3", "pre-commit>=3"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
