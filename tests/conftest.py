@@ -44,16 +44,21 @@ _odoo_service_server.set_limit_memory_hard = MagicMock()
 _odoo_tools = MagicMock()
 _odoo_tools.config = _ConfigDict()  # placeholder; cfg fixture replaces per-test
 
+_odoo_tools_osutil = MagicMock()
+_odoo_tools_osutil.memory_info = MagicMock(return_value=0)
+
 for _mod, _stub in [
     ("odoo", MagicMock()),
     ("odoo.tools", _odoo_tools),
     ("odoo.tools.config", MagicMock()),
     ("odoo.tools.cache", MagicMock()),
     ("odoo.tools.misc", MagicMock()),
+    ("odoo.tools.osutil", _odoo_tools_osutil),
     ("odoo.service", MagicMock()),
     ("odoo.service.server", _odoo_service_server),
     ("odoo.sql_db", MagicMock()),
     ("odoo.http", MagicMock()),
+    ("psutil", MagicMock()),
 ]:
     sys.modules.setdefault(_mod, _stub)
 
@@ -81,6 +86,7 @@ def cfg(monkeypatch):
     fresh = _ConfigDict(_DEFAULT_CONFIG)
     monkeypatch.setattr(_tools, "config", fresh)
     monkeypatch.setattr("odoo_hybrid.server.config", fresh)
+    monkeypatch.setattr("odoo_hybrid.__main__.config", fresh)
     return fresh
 
 
@@ -100,4 +106,9 @@ def default_args():
         limit_request=None,
         limit_time_real=None,
         limit_time_real_cron=None,
+        limit_memory_soft_thread=None,
+        limit_memory_hard_thread=None,
+        limit_request_thread=None,
+        limit_time_real_thread=None,
+        limit_memory_soft_effective=2058 * 1024 * 1024,
     )

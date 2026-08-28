@@ -2,6 +2,8 @@ import argparse
 import logging
 import sys
 
+from odoo.tools import config
+
 _logger = logging.getLogger(__name__)
 _MiB = 1024 * 1024
 
@@ -161,8 +163,6 @@ _BUILTIN_LIMITS: dict[str, int | float] = {
 
 
 def _apply_config(args: argparse.Namespace) -> None:
-    from odoo.tools import config
-
     # Three-level precedence: CLI flag > odoo.conf value > built-in default
     for attr, key in [
         ("limit_memory_soft", "limit_memory_soft"),
@@ -181,7 +181,9 @@ def _apply_config(args: argparse.Namespace) -> None:
     config["http_port"] = args.http_port
     config["http_interface"] = args.host
 
-    # v0.1: Worker.check_limits() reads config directly; 0 disables soft enforcement
+    # Save resolved value before zeroing; HybridMaster reads it from args
+    args.limit_memory_soft_effective = config["limit_memory_soft"]
+    # 0 disables Odoo's own soft-limit enforcement; we enforce it in the monitor thread
     config["limit_memory_soft"] = 0
     # prevent Odoo's own worker management from activating
     config["workers"] = 0
@@ -190,12 +192,10 @@ def _apply_config(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     hybrid_argv, odoo_argv = _split_argv()
     args = _build_parser().parse_args(hybrid_argv)
 
     from odoo.service.server import load_server_wide_modules
-    from odoo.tools import config
 
     config.parse_config(odoo_argv)
     _apply_config(args)

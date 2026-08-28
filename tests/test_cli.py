@@ -116,3 +116,9 @@ class TestApplyConfig:
         _apply_config(default_args)
         assert cfg["http_port"] == 9000
         assert cfg["http_interface"] == "0.0.0.0"
+
+    def test_limit_memory_soft_effective_saved_before_zeroing(self, cfg, default_args):
+        default_args.limit_memory_soft = 1073741824
+        _apply_config(default_args)
+        assert default_args.limit_memory_soft_effective == 1073741824
+        assert cfg["limit_memory_soft"] == 0

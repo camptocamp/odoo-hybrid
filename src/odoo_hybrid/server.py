@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Any
 
+import psutil
 from odoo import sql_db
 from odoo.service.server import (
     ThreadedWSGIServerReloadable,
@@ -26,6 +27,7 @@ from odoo.service.server import (
 from odoo.tools import config
 from odoo.tools.cache import log_ormcache_stats
 from odoo.tools.misc import dumpstacks
+from odoo.tools.osutil import memory_info
 
 _logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class _ThreadedWorkerServer(ThreadedWSGIServerReloadable):
     """ThreadedWSGIServerReloadable that uses an inherited master socket fd instead of binding."""
 
     def __init__(self, host: str, port: int, app: Any, *, inherited_fd: int) -> None:
+        self.request_count = 0
         self._inherited_fd = inherited_fd
         super().__init__(host, port, app)
 
@@ -46,6 +49,10 @@ class _ThreadedWorkerServer(ThreadedWSGIServerReloadable):
     def server_activate(self) -> None:
         pass  # socket already listening in master
 
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        self.request_count += 1
+        super().process_request_thread(request, client_address)
+
 
 class ThreadedWorker:
     """HTTP worker process: runs serve_forever() on an inherited socket in a forked child."""
@@ -54,12 +61,17 @@ class ThreadedWorker:
         self.master = master
         self.watchdog_pipe = master.pipe_new()
         self.eintr_pipe = master.pipe_new()
+        self.drain_pipe = master.pipe_new()
         self.watchdog_time = time.time()
         self.watchdog_timeout: float | None = master.timeout
+        self.limit_memory_soft: int = master.limit_memory_soft_thread
+        self.limit_request: int = master.limit_request_thread
+        self.drain_timeout: float = master.timeout_thread
+        self.drain_time: float | None = None
         self.pid: int | None = None
 
     def close(self) -> None:
-        for fd in (*self.watchdog_pipe, *self.eintr_pipe):
+        for fd in (*self.watchdog_pipe, *self.eintr_pipe, *self.drain_pipe):
             with contextlib.suppress(OSError):
                 os.close(fd)
 
@@ -80,6 +92,26 @@ class ThreadedWorker:
             http.root,
             inherited_fd=self.master.socket.fileno(),
         )
+
+        def _memory_monitor() -> None:
+            while True:
+                time.sleep(self.master.beat)
+                rss = memory_info(psutil.Process(os.getpid()))
+                should_drain = (self.limit_memory_soft and rss > self.limit_memory_soft) or (
+                    self.limit_request and server.request_count >= self.limit_request
+                )
+                if should_drain:
+                    _logger.info(
+                        "Worker (%s) entering drain (rss=%d, requests=%d)",
+                        self.pid,
+                        rss,
+                        server.request_count,
+                    )
+                    self.master.pipe_ping(self.drain_pipe)  # notify master before shutting down
+                    server.shutdown()
+                    return
+
+        threading.Thread(target=_memory_monitor, daemon=True, name="odoo-hybrid.memory").start()
         _logger.info("Worker ThreadedWorker (%s) alive", self.pid)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
@@ -100,9 +132,9 @@ class HybridMaster:
         self.queue: collections.deque[int] = collections.deque()
         self.workers: dict[int, Any] = {}
         self.workers_thread: dict[int, ThreadedWorker] = {}
+        self.workers_draining: dict[int, ThreadedWorker] = {}
         self.workers_cron: dict[int, WorkerCron] = {}
-        # v0.1: cap at 1 each (v0.2 removes the thread cap)
-        self.n_workers_thread = min(args.workers_thread, 1)
+        self.n_workers_thread = args.workers_thread
         self.n_workers_cron = min(args.workers_cron, 1)
         # read values already resolved by _apply_config
         self.timeout: float = config["limit_time_real"]
@@ -111,6 +143,11 @@ class HybridMaster:
         self.limit_request: int = config["limit_request"]
         self.interface: str = config["http_interface"] or "0.0.0.0"
         self.http_port: int = config["http_port"]
+        # per-thread-worker limits (fall back to global when not overridden)
+        self.limit_memory_soft: int = args.limit_memory_soft_effective or 0
+        self.limit_memory_soft_thread: int = args.limit_memory_soft_thread or self.limit_memory_soft
+        self.limit_request_thread: int = args.limit_request_thread or self.limit_request
+        self.timeout_thread: float = args.limit_time_real_thread or self.timeout
 
     # ------------------------------------------------------------------
     # IPC utilities — WorkerCron calls self.multi.pipe_new() / pipe_ping()
@@ -167,6 +204,7 @@ class HybridMaster:
             worker = self.workers.pop(pid)
             self.workers_thread.pop(pid, None)
             self.workers_cron.pop(pid, None)
+            self.workers_draining.pop(pid, None)
             with contextlib.suppress(OSError):
                 worker.close()
 
@@ -196,7 +234,13 @@ class HybridMaster:
 
     def process_timeout(self) -> None:
         now = time.time()
+        for pid, worker in list(self.workers_draining.items()):
+            if worker.drain_time is not None and (now - worker.drain_time) >= worker.drain_timeout:
+                _logger.error("ThreadedWorker (%s) drain timeout after %ss", pid, worker.drain_timeout)
+                self.worker_kill(pid, signal.SIGKILL)
         for pid, worker in list(self.workers.items()):
+            if pid in self.workers_draining:
+                continue  # drain timeout checked above
             if worker.watchdog_timeout is not None and (now - worker.watchdog_time) >= worker.watchdog_timeout:
                 _logger.error(
                     "%s (%s) timeout after %ss",
@@ -242,11 +286,20 @@ class HybridMaster:
 
     def sleep(self) -> None:
         try:
-            fds = {w.watchdog_pipe[0]: w for w in self.workers.values()}
-            ready = select.select([*fds, self.pipe[0]], [], [], self.beat)
+            watchdog_fds = {w.watchdog_pipe[0]: w for w in self.workers.values()}
+            drain_fds = {w.drain_pipe[0]: w for w in self.workers_thread.values()}
+            ready = select.select([*watchdog_fds, *drain_fds, self.pipe[0]], [], [], self.beat)
             for fd in ready[0]:
-                if fd in fds:
-                    fds[fd].watchdog_time = time.time()
+                if fd in watchdog_fds:
+                    watchdog_fds[fd].watchdog_time = time.time()
+                elif fd in drain_fds:
+                    worker = drain_fds[fd]
+                    pid = worker.pid
+                    worker.drain_time = time.time()
+                    self.workers_thread.pop(pid, None)
+                    self.workers_draining[pid] = worker
+                    self._spawn_threaded_worker()
+                    _logger.info("Worker (%s) entered drain; replacement spawned", pid)
                 empty_pipe(fd)
         except OSError as e:
             if e.args[0] not in [errno.EINTR]:

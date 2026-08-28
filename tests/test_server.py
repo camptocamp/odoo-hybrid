@@ -37,9 +37,9 @@ class TestHybridMasterInit:
         cfg["http_interface"] = "127.0.0.1"
         assert HybridMaster(default_args).interface == "127.0.0.1"
 
-    def test_n_workers_thread_capped_at_one(self, cfg, default_args):
+    def test_n_workers_thread_reflects_args(self, cfg, default_args):
         default_args.workers_thread = 5
-        assert HybridMaster(default_args).n_workers_thread == 1
+        assert HybridMaster(default_args).n_workers_thread == 5
 
     def test_n_workers_cron_capped_at_one(self, cfg, default_args):
         default_args.workers_cron = 3
@@ -49,6 +49,24 @@ class TestHybridMasterInit:
         cfg["limit_time_real"] = 120.0
         cfg["limit_time_real_cron"] = -1
         assert HybridMaster(default_args).cron_timeout == 120.0
+
+    def test_workers_draining_empty_on_init(self, cfg, default_args):
+        assert HybridMaster(default_args).workers_draining == {}
+
+    def test_timeout_thread_falls_back_to_timeout(self, cfg, default_args):
+        cfg["limit_time_real"] = 90.0
+        default_args.limit_time_real_thread = None
+        assert HybridMaster(default_args).timeout_thread == 90.0
+
+    def test_timeout_thread_overrides_global(self, cfg, default_args):
+        cfg["limit_time_real"] = 90.0
+        default_args.limit_time_real_thread = 30.0
+        assert HybridMaster(default_args).timeout_thread == 30.0
+
+    def test_limit_request_thread_falls_back_to_limit_request(self, cfg, default_args):
+        cfg["limit_request"] = 1000
+        default_args.limit_request_thread = None
+        assert HybridMaster(default_args).limit_request_thread == 1000
 
 
 # ---------------------------------------------------------------------------
@@ -146,23 +164,53 @@ class TestSignalProcessing:
 class TestWorkerLifecycle:
     def test_process_spawn_fills_thread_workers_to_target(self, master, monkeypatch):
         calls = []
-        monkeypatch.setattr(master, "_spawn_threaded_worker", lambda: calls.append(1))
+
+        def fake_spawn():
+            calls.append(1)
+            master.workers_thread[1000 + len(calls)] = MagicMock()
+
+        monkeypatch.setattr(master, "_spawn_threaded_worker", fake_spawn)
         master.process_spawn()
         assert len(calls) == 1
 
     def test_process_spawn_no_spawn_when_already_full(self, master, monkeypatch):
         calls = []
         monkeypatch.setattr(master, "_spawn_threaded_worker", lambda: calls.append(1))
-        master.workers_thread[1234] = MagicMock()
+        worker = MagicMock()
+        master.workers_thread[1234] = worker
+        master.workers[1234] = worker
         master.process_spawn()
         assert len(calls) == 0
+
+    def test_process_spawn_ignores_draining_workers(self, master, monkeypatch):
+        calls = []
+
+        def fake_spawn():
+            calls.append(1)
+            master.workers_thread[1000 + len(calls)] = MagicMock()
+
+        monkeypatch.setattr(master, "_spawn_threaded_worker", fake_spawn)
+        draining = MagicMock()
+        master.workers_draining[9876] = draining
+        master.workers[9876] = draining
+        # workers_thread is empty — one thread worker must be spawned
+        master.process_spawn()
+        assert len(calls) == 1
 
     def test_process_spawn_cron_when_requested(self, cfg, default_args, monkeypatch):
         default_args.workers_cron = 1
         m = HybridMaster(default_args)
         cron_calls = []
-        monkeypatch.setattr(m, "_spawn_cron_worker", lambda: cron_calls.append(1))
-        monkeypatch.setattr(m, "_spawn_threaded_worker", lambda: None)
+
+        def fake_spawn_cron():
+            cron_calls.append(1)
+            m.workers_cron[2000 + len(cron_calls)] = MagicMock()
+
+        def fake_spawn_thread():
+            m.workers_thread[1000 + len(m.workers_thread)] = MagicMock()
+
+        monkeypatch.setattr(m, "_spawn_cron_worker", fake_spawn_cron)
+        monkeypatch.setattr(m, "_spawn_threaded_worker", fake_spawn_thread)
         m.process_spawn()
         assert len(cron_calls) == 1
 
@@ -205,13 +253,43 @@ class TestWorkerLifecycle:
         master.process_timeout()
         assert len(kills) == 0
 
+    def test_process_timeout_drain_timeout_kills_draining_worker(self, master, monkeypatch):
+        mock_worker = MagicMock(spec=ThreadedWorker)
+        mock_worker.drain_time = time.time() - 200.0
+        mock_worker.drain_timeout = 120.0
+        mock_worker.watchdog_timeout = 120.0
+        mock_worker.watchdog_time = time.time()
+        master.workers[6666] = mock_worker
+        master.workers_draining[6666] = mock_worker
+
+        kills = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+        master.process_timeout()
+        assert (6666, signal.SIGKILL) in kills
+
+    def test_process_timeout_no_watchdog_kill_for_draining_worker(self, master, monkeypatch):
+        mock_worker = MagicMock(spec=ThreadedWorker)
+        mock_worker.drain_time = time.time()
+        mock_worker.drain_timeout = 120.0
+        mock_worker.watchdog_timeout = 5.0
+        mock_worker.watchdog_time = time.time() - 100.0  # would normally trigger watchdog
+        master.workers[6665] = mock_worker
+        master.workers_draining[6665] = mock_worker
+
+        kills = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+        master.process_timeout()
+        assert len(kills) == 0  # drain timeout not reached; watchdog skipped for draining
+
     def test_worker_pop_removes_from_all_dicts(self, master):
         mock_worker = MagicMock()
         master.workers[5555] = mock_worker
         master.workers_thread[5555] = mock_worker
+        master.workers_draining[5555] = mock_worker
         master.worker_pop(5555)
         assert 5555 not in master.workers
         assert 5555 not in master.workers_thread
+        assert 5555 not in master.workers_draining
 
 
 # ---------------------------------------------------------------------------
@@ -225,12 +303,13 @@ class TestThreadedWorker:
         try:
             assert worker.watchdog_pipe[0] >= 0
             assert worker.eintr_pipe[0] >= 0
+            assert worker.drain_pipe[0] >= 0
         finally:
             worker.close()
 
     def test_close_closes_all_fds(self, master):
         worker = ThreadedWorker(master)
-        fds = [*worker.watchdog_pipe, *worker.eintr_pipe]
+        fds = [*worker.watchdog_pipe, *worker.eintr_pipe, *worker.drain_pipe]
         worker.close()
         for fd in fds:
             with pytest.raises(OSError):
