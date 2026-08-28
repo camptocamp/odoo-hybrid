@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "odoo-hybrid"
-version = "0.0.0"
+version = "0.2.0"
 description = "Alternative Odoo server runner with multithreaded workers"
 readme = "README.md"
 requires-python = ">=3.10"
