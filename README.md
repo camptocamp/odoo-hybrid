@@ -64,7 +64,7 @@ options:
   --limit-memory-hard-gevent=INT memory hard limit for the gevent worker (default to the value of --limit-memory-hard)
   --http-port=INT                port on which the master process listens for connections (default 8069)
   --gevent-port=INT              port on which the gevent worker listens (default 8072)
-  --host                         IP address or hostname on which to bind (default: localhost)
+  --host                         IP address or hostname on which to bind (default: 0.0.0.0)
 
 all the <odoo_options> are passed as-is to the odoo processes
 

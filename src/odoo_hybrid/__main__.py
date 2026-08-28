@@ -139,7 +139,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--gevent-port", type=int, default=8072, metavar="INT", help="port for gevent worker (default: 8072)"
     )
-    p.add_argument("--host", default="localhost", help="IP or hostname to bind (default: localhost)")
+    p.add_argument("--host", default="0.0.0.0", help="IP or hostname to bind (default: 0.0.0.0)")
 
     return p
 
