@@ -310,6 +310,8 @@ class HybridMaster:
     def process_spawn(self) -> None:
         while len(self.workers_thread) < self.n_workers_thread:
             self._spawn_threaded_worker()
+        while len(self.workers_thread) > self.n_workers_thread:
+            self.worker_kill(next(iter(self.workers_thread)), signal.SIGINT)
         while len(self.workers_cron) < self.n_workers_cron:
             self._spawn_cron_worker()
         if self.n_workers_gevent and not self.gevent_pid:
