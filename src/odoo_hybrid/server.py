@@ -290,7 +290,11 @@ class HybridMaster:
         if odoo_bin is None:
             import odoo as _odoo_pkg
 
-            odoo_bin = os.path.join(os.path.dirname(os.path.dirname(_odoo_pkg.__file__)), "odoo-bin")
+            if _odoo_pkg.__file__ is not None:
+                odoo_bin = os.path.join(os.path.dirname(os.path.dirname(_odoo_pkg.__file__)), "odoo-bin")
+            else:
+                # namespace package: __path__ holds the package directory
+                odoo_bin = os.path.join(os.path.dirname(next(iter(_odoo_pkg.__path__))), "odoo-bin")
         cmd = [
             sys.executable,
             odoo_bin,
