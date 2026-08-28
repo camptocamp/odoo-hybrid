@@ -71,6 +71,7 @@ _DEFAULT_CONFIG = {
     "limit_time_real_cron": 600.0,
     "http_port": 8069,
     "http_interface": "",
+    "gevent_port": 8072,
     "db_name": "",
     "workers": 2,
     "max_cron_threads": 2,
@@ -96,7 +97,7 @@ def default_args():
     return argparse.Namespace(
         workers_thread=1,
         workers_cron=0,
-        workers_gevent=1,
+        workers_gevent=0,
         http_port=8069,
         gevent_port=8072,
         host="0.0.0.0",
@@ -111,4 +112,6 @@ def default_args():
         limit_request_thread=None,
         limit_time_real_thread=None,
         limit_memory_soft_effective=2058 * 1024 * 1024,
+        limit_memory_soft_gevent=None,
+        odoo_argv=[],
     )

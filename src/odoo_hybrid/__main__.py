@@ -180,6 +180,7 @@ def _apply_config(args: argparse.Namespace) -> None:
     # CLI fully owns network binding
     config["http_port"] = args.http_port
     config["http_interface"] = args.host
+    config["gevent_port"] = args.gevent_port
 
     # Save resolved value before zeroing; HybridMaster reads it from args
     args.limit_memory_soft_effective = config["limit_memory_soft"]
@@ -194,6 +195,7 @@ def _apply_config(args: argparse.Namespace) -> None:
 def main() -> None:
     hybrid_argv, odoo_argv = _split_argv()
     args = _build_parser().parse_args(hybrid_argv)
+    args.odoo_argv = odoo_argv
 
     from odoo.service.server import load_server_wide_modules
 

@@ -341,3 +341,139 @@ class TestThreadedWorker:
             assert worker.pid is None
         finally:
             worker.close()
+
+
+# ---------------------------------------------------------------------------
+# HybridMaster — gevent worker
+# ---------------------------------------------------------------------------
+
+
+class TestGeventWorker:
+    def test_n_workers_gevent_reflects_args(self, cfg, default_args):
+        default_args.workers_gevent = 1
+        assert HybridMaster(default_args).n_workers_gevent == 1
+
+    def test_n_workers_gevent_zero(self, cfg, default_args):
+        default_args.workers_gevent = 0
+        assert HybridMaster(default_args).n_workers_gevent == 0
+
+    def test_gevent_pid_none_on_init(self, master):
+        assert master.gevent_pid is None
+
+    def test_gevent_port_read_from_config(self, cfg, default_args):
+        cfg["gevent_port"] = 9090
+        assert HybridMaster(default_args).gevent_port == 9090
+
+    def test_spawn_gevent_worker_stores_pid(self, master, monkeypatch):
+        mock_proc = MagicMock()
+        mock_proc.pid = 5555
+        monkeypatch.setattr("odoo_hybrid.server.shutil.which", lambda _: "/usr/bin/odoo-bin")
+        monkeypatch.setattr("odoo_hybrid.server.subprocess.Popen", lambda cmd, **kw: mock_proc)
+        master._spawn_gevent_worker()
+        assert master.gevent_pid == 5555
+
+    def test_spawn_gevent_worker_cmd_includes_gevent_subcommand(self, master, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("odoo_hybrid.server.shutil.which", lambda _: "/usr/bin/odoo-bin")
+        monkeypatch.setattr(
+            "odoo_hybrid.server.subprocess.Popen",
+            lambda cmd, **kw: captured.update(cmd=cmd) or MagicMock(pid=1),
+        )
+        master._spawn_gevent_worker()
+        assert "gevent" in captured["cmd"]
+        assert "--gevent-port" in captured["cmd"]
+        assert str(master.gevent_port) in captured["cmd"]
+
+    def test_spawn_gevent_worker_fallback_when_no_odoo_bin(self, master, monkeypatch):
+        import sys
+        import types
+
+        captured = {}
+        monkeypatch.setattr("odoo_hybrid.server.shutil.which", lambda _: None)
+        monkeypatch.setitem(sys.modules, "odoo", types.SimpleNamespace(__file__="/odoo/odoo/__init__.py"))
+        monkeypatch.setattr(
+            "odoo_hybrid.server.subprocess.Popen",
+            lambda cmd, **kw: captured.update(cmd=cmd) or MagicMock(pid=1),
+        )
+        master._spawn_gevent_worker()
+        assert captured["cmd"][1].endswith("odoo-bin")
+
+    def test_spawn_gevent_worker_passes_odoo_argv(self, master, monkeypatch):
+        master.odoo_argv = ["-c", "odoo.conf"]
+        captured = {}
+        monkeypatch.setattr("odoo_hybrid.server.shutil.which", lambda _: "/usr/bin/odoo-bin")
+        monkeypatch.setattr(
+            "odoo_hybrid.server.subprocess.Popen",
+            lambda cmd, **kw: captured.update(cmd=cmd) or MagicMock(pid=1),
+        )
+        master._spawn_gevent_worker()
+        assert "-c" in captured["cmd"]
+        assert "odoo.conf" in captured["cmd"]
+
+    def test_process_spawn_starts_gevent_when_enabled(self, master, monkeypatch):
+        master.n_workers_gevent = 1
+        spawned = []
+        monkeypatch.setattr(master, "_spawn_threaded_worker", lambda: master.workers_thread.__setitem__(1, MagicMock()))
+        monkeypatch.setattr(master, "_spawn_gevent_worker", lambda: spawned.append(1))
+        master.process_spawn()
+        assert len(spawned) == 1
+
+    def test_process_spawn_no_double_gevent(self, master, monkeypatch):
+        master.n_workers_gevent = 1
+        master.gevent_pid = 9000
+        spawned = []
+        monkeypatch.setattr(master, "_spawn_threaded_worker", lambda: master.workers_thread.__setitem__(1, MagicMock()))
+        monkeypatch.setattr(master, "_spawn_gevent_worker", lambda: spawned.append(1))
+        master.process_spawn()
+        assert len(spawned) == 0
+
+    def test_process_spawn_no_gevent_when_disabled(self, cfg, default_args, monkeypatch):
+        default_args.workers_gevent = 0
+        m = HybridMaster(default_args)
+        spawned = []
+        monkeypatch.setattr(m, "_spawn_threaded_worker", lambda: m.workers_thread.__setitem__(1, MagicMock()))
+        monkeypatch.setattr(m, "_spawn_gevent_worker", lambda: spawned.append(1))
+        m.process_spawn()
+        assert len(spawned) == 0
+
+    def test_process_zombie_clears_gevent_pid(self, master, monkeypatch):
+        master.gevent_pid = 7777
+        call_count = [0]
+
+        def fake_waitpid(pid, flags):
+            if call_count[0] == 0:
+                call_count[0] += 1
+                return (7777, 0)
+            raise OSError(errno.ECHILD, "No child processes")
+
+        monkeypatch.setattr(os, "waitpid", fake_waitpid)
+        pop_calls = []
+        monkeypatch.setattr(master, "worker_pop", lambda pid: pop_calls.append(pid))
+        master.process_zombie()
+        assert master.gevent_pid is None
+        assert 7777 not in pop_calls
+
+    def test_stop_kills_gevent(self, master, monkeypatch):
+        master.gevent_pid = 4321
+        kills = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+        monkeypatch.setattr(master, "worker_kill", lambda pid, sig: None)
+        master.socket = None
+        master.stop(graceful=False)
+        assert (4321, signal.SIGKILL) in kills
+        assert master.gevent_pid is None
+
+    def test_stop_graceful_kills_gevent(self, master, monkeypatch):
+        master.gevent_pid = 4322
+        kills = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+        monkeypatch.setattr(master, "worker_kill", lambda pid, sig: None)
+        monkeypatch.setattr(master, "process_signals", lambda: None)
+        monkeypatch.setattr(master, "process_zombie", lambda: None)
+        monkeypatch.setattr(master, "sleep", lambda: None)
+        monkeypatch.setattr(master, "process_timeout", lambda: None)
+        master.socket = None
+        master.workers.clear()
+        master.stop(graceful=True)
+        assert (4322, signal.SIGKILL) in kills
+        assert master.gevent_pid is None
