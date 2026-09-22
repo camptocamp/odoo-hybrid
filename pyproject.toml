@@ -7,8 +7,22 @@ name = "odoo-hybrid"
 version = "0.3.0"
 description = "Alternative Odoo server runner with multithreaded workers"
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Alexandre Fayolle", email = "alexandre.fayolle@camptocamp.com" }
+]
 requires-python = ">=3.10"
 # Odoo is not declared as a dependency; it must be present in the environment separately.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Operating System :: POSIX",
+    "Framework :: Odoo",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 
 [project.scripts]
 odoo-hybrid = "odoo_hybrid.__main__:main"
