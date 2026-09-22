@@ -1,3 +1,6 @@
+# Copyright 2026 Camptocamp SA
+# Copyright 2015 Odoo
+# License LGPL-3.0 or later (http://www.gnu.org/licenses/lgpl.html)
 from __future__ import annotations
 
 import argparse
