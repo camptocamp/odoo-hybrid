@@ -15,6 +15,8 @@ The package provides a command line tool, `odoo-hybrid` which can be used to run
 ```bash
 pip install odoo-hybrid
 ```
+Odoo itself is not declared as a package dependency — it must be present in the environment separately (installed from source or via a distribution package).
+
 
 ### Installing or updating Odoo addons
 
@@ -39,6 +41,7 @@ All options after `--` are passed as-is to each Odoo process. The `--workers`, `
 
 ## Command line interface
 
+```
 odoo-hybrid <options> [ -- <odoo_options> ]
 
 options:
@@ -66,7 +69,8 @@ options:
   --gevent-port=INT              port on which the gevent worker listens (default 8072)
   --host                         IP address or hostname on which to bind (default: 0.0.0.0)
 
-all the <odoo_options> are passed as-is to the odoo processes
+all <odoo_options> are passed as-is to the odoo processes
+```
 
 ### Option precedence
 
@@ -117,10 +121,10 @@ If the draining worker has not exited within `limit-time-real-thread` seconds af
 
 ### Crash vs drain distinction
 
-| Event | Drain pipe written? | Master action |
-|---|---|---|
-| Graceful drain | Yes, before socket close | Spawn replacement immediately |
-| Crash / SIGKILL | No | Spawn replacement on SIGCHLD |
+| Event           | Drain pipe written?      | Master action                 |
+|-----------------|--------------------------|-------------------------------|
+| Graceful drain  | Yes, before socket close | Spawn replacement immediately |
+| Crash / SIGKILL | No                       | Spawn replacement on SIGCHLD  |
 
 Key property: the replacement spawns **before** the draining worker exits, so the pool never drops below the target size during normal soft-limit recycling.
 
@@ -151,17 +155,17 @@ For multithreaded workers, an additional drain notification pipe is used: when a
 
 ### Signals
 
-| Direction | Signal | Meaning |
-|---|---|---|
-| external → master | SIGINT / SIGTERM | shutdown |
-| external → master | SIGHUP | graceful reload (phoenix restart) |
-| external → master | SIGQUIT | dump stacks |
-| external → master | SIGTTIN / SIGTTOU | add / remove worker |
-| external → master | SIGUSR1 / SIGUSR2 | ormcache stats |
-| master → worker | SIGINT | graceful stop |
-| master → worker | SIGKILL | hard kill (watchdog timeout) |
-| master → worker | SIGTERM | force kill (shutdown) |
-| worker → master | SIGCHLD | automatic on worker exit or crash |
+| Direction         | Signal            | Meaning                           |
+|-------------------|-------------------|-----------------------------------|
+| external → master | SIGINT / SIGTERM  | shutdown                          |
+| external → master | SIGHUP            | graceful reload (phoenix restart) |
+| external → master | SIGQUIT           | dump stacks                       |
+| external → master | SIGTTIN / SIGTTOU | add / remove worker               |
+| external → master | SIGUSR1 / SIGUSR2 | ormcache stats                    |
+| master → worker   | SIGINT            | graceful stop                     |
+| master → worker   | SIGKILL           | hard kill (watchdog timeout)      |
+| master → worker   | SIGTERM           | force kill (shutdown)             |
+| worker → master   | SIGCHLD           | automatic on worker exit or crash |
 
 Each worker also has an eintr pipe whose write end is registered with `signal.set_wakeup_fd()`. This causes Python to write a byte to it on any signal receipt, allowing signals to interrupt blocking `select()` calls inside the worker.
 
@@ -181,66 +185,21 @@ Each cron worker holds a persistent PostgreSQL connection with `LISTEN cron_trig
 
 Reusable components from `odoo/service/server.py` are used where they reduce implementation effort without harming maintainability:
 
-| Component | Reuse decision |
-|---|---|
-| `ThreadedWSGIServerReloadable` | Reuse as-is — threaded workers run `serve_forever()` on it |
-| `RequestHandler`, `CommonRequestHandler` | Reuse as-is |
-| `WorkerCron` | Reuse as-is |
-| `preload_registries()` | Reuse as-is, called in master when `--preload` is set |
-| `load_server_wide_modules()` | Reuse as-is — called in master before forking any worker, same as multi worker mode; modules are loaded once and inherited via copy-on-write |
-| `set_limit_memory_hard()`, `memory_info()` | Reuse as-is |
-| `PreforkServer` master loop pattern | Adapt — pipe/signal/beat loop is the model, but reimplemented to support threaded workers and drain semantics |
-| `Worker` base class | Adapt — cron worker reused; threaded worker has a different `process_work()`, a dedicated memory monitor thread, and drain logic |
-| `GeventServer` / `long_polling_spawn()` | Reuse `long_polling_spawn()` logic as-is to spawn the gevent worker |
+| Component                                  | Reuse decision          |
+|--------------------------------------------|-------------------------|
+| `ThreadedWSGIServerReloadable`             | Reuse as-is — threaded workers run `serve_forever()` on it |
+| `RequestHandler`, `CommonRequestHandler`   | Reuse as-is             |
+| `WorkerCron`                               | Reuse as-is             |
+| `preload_registries()`                     | Reuse as-is, called in master when `--preload` is set |
+| `load_server_wide_modules()`               | Reuse as-is, called in master before forking any worker, same as multi worker mode; modules are loaded once and inherited via copy-on-write |
+| `set_limit_memory_hard()`, `memory_info()` | Reuse as-is             |
+| `PreforkServer` master loop pattern        | Adapt — pipe/signal/beat loop is the model, but reimplemented to support threaded workers and drain semantics |
+| `Worker` base class                        | Adapt — cron worker reused; threaded worker has a different `process_work()`, a dedicated memory monitor thread, and drain logic |
+| `GeventServer` / `long_polling_spawn()`    | Reuse `long_polling_spawn()` logic as-is to spawn the gevent worker |
 
 Where Odoo internals are reused, the implementation imports them directly (e.g. `from odoo.service.server import ThreadedWSGIServerReloadable`). This means `odoo-hybrid` must be installed in an environment where Odoo is importable.
-
-### Package structure
-
-`odoo-hybrid` is a standalone pip-installable package. It declares a `console_scripts` entry point so that `pip install odoo-hybrid` makes the `odoo-hybrid` command available on `PATH`:
-
-```toml
-[project.scripts]
-odoo-hybrid = "odoo_hybrid.__main__:main"
-```
-
-Odoo itself is not declared as a package dependency — it must be present in the environment separately (installed from source or via a distribution package).
 
 ## References
 
 `odoo/service/server.py` : reference implementation
-
-## Roadmap
-
-### v0.0 — Project bootstrap
-
-- `pyproject.toml` with package metadata and `console_scripts` entry point
-- pre-commit hooks with ruff (linter + formatter)
-- Skeleton `odoo-hybrid` script: argument parsing, no-op startup
-
-### v0.1 — Minimal viable runner
-
-- At most 1 threaded worker and 1 cron worker
-- No gevent worker
-- No drain logic
-- No soft memory / request / time-real limit enforcement
-- Hard memory limit enforced (SIGKILL on OOM)
-
-### v0.1.1 — Automated tests
-
-- pytest test suite covering CLI parsing, HybridMaster, and ThreadedWorker
-- Odoo import stubs so unit tests run without a real Odoo installation
-
-### v0.2 — Resource management
-
-- Drain logic for threaded workers (soft memory limit, request count, time-real)
-- Multiple threaded workers (`--workers-thread` > 1)
-
-### v0.3 — Gevent support
-
-- Gevent worker via `long_polling_spawn()`
-
-
-
-
 
